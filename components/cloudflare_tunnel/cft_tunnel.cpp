@@ -172,6 +172,7 @@ struct Tunnel::Impl {
   void apply_config() {
     bool ok = false;
     int32_t version = config_version;
+    ESP_LOGD(TAG, "Ingress update: %.*s", (int) (config_len > 400 ? 400 : config_len), (const char *) config_body);
     cJSON *root = cJSON_ParseWithLength((const char *) config_body, config_len);
     cJSON *v = cJSON_GetObjectItemCaseSensitive(root, "version");
     cJSON *ingress = cJSON_GetObjectItemCaseSensitive(cJSON_GetObjectItemCaseSensitive(root, "config"), "ingress");
@@ -382,6 +383,7 @@ struct Tunnel::Impl {
   void start_stream(Slot *s, bool end) {
     Request req{s->id, block, block_count, end};
     Bytes upgrade = req.get("cf-cloudflared-proxy-connection-upgrade");
+    ESP_LOGD(TAG, "Stream %d: %.*s", (int) s->id, (int) (upgrade.len ? upgrade.len : 4), upgrade.len ? (const char *) upgrade.ptr : "http");
     if (is(upgrade, "control-stream")) s->kind = CONTROL;
     else if (is(upgrade, "update-configuration")) s->kind = CONFIG;
     else if (upgrade.len) return rst(s->id, NGHTTP2_REFUSED_STREAM);  // websocket and friends are not proxied
