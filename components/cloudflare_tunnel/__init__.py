@@ -4,6 +4,7 @@ from esphome.const import CONF_ID, CONF_PATH
 from esphome.components.esp32 import (
     add_idf_component,
     add_idf_sdkconfig_option,
+    idf_version,
     include_builtin_idf_component,
 )
 
@@ -55,7 +56,10 @@ async def to_code(config):
         cg.add(var.add_page(page[CONF_PATH], page[CONF_CONTENT_TYPE], page[CONF_CONTENT]))
 
     include_builtin_idf_component("esp-tls")
-    include_builtin_idf_component("json")
+    if idf_version() >= cv.Version(6, 0, 0):
+        add_idf_component(name="espressif/cjson", ref="1.7.19")  # moved out of IDF core in 6.0
+    else:
+        include_builtin_idf_component("json")
     add_idf_component(name="espressif/nghttp", ref="1.68.1")
     # The edge requires TLS 1.3.
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_SSL_PROTO_TLS1_3", True)
