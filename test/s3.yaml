@@ -1,0 +1,22 @@
+esphome:
+  name: cf-tunnel-s3
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+    version: 5.5.4
+wifi:
+  ssid: x
+  password: xxxxxxxx
+logger:
+web_server:
+external_components:
+  - source:
+      type: local
+      path: ../components
+cloudflare_tunnel:
+  token: eyJhIjoiMDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWYiLCJ0IjoiMDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDAwMDAwIiwicyI6IkFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUE9In0=
+  hostname: test.example.com
+  pages:
+    - path: /hello
+      content: hello from esphome
