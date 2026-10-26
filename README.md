@@ -18,6 +18,8 @@ web_server:                        # what the proxy exposes
 
 Needs the `esp-idf` framework (built and tested on 5.5.4, ESP32-S3). Requires WiFi/Ethernet plus `time:` (SNTP) — the tunnel waits for a valid clock.
 
+The tunnel must have a public hostname route for `hostname` (service `http://localhost:80`) in Zero Trust, or it registers but never goes Online: the edge only sends the ingress config once the route exists, and the device retries every 30 s with "No ingress configuration received".
+
 ## How it works
 Own implementation, written from the public [cloudflared](https://github.com/cloudflare/cloudflared) sources (no code copied): TLS 1.3 to the edge on 7844 (`h2.cftunnel.com`), the device acts as the HTTP/2 server (nghttp2), registers over Cap'n Proto RPC on the control stream, and takes its ingress config from the edge. Host-side tests of the Cap'n Proto/RPC/token code against Go-generated vectors are in `test/host`.
 
