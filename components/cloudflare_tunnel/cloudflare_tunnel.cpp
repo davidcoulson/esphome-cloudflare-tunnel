@@ -10,10 +10,6 @@
 #include "lwip/dns.h"
 #include "lwip/sockets.h"
 
-extern "C" {
-#include "cf_h2.h"
-#include "cf_credentials.h"
-}
 
 namespace esphome {
 namespace cloudflare_tunnel {
@@ -22,12 +18,13 @@ static const char *const TAG = "cloudflare_tunnel";
 
 // One slot per application stream. A stream serves a static body (page or error) or proxies to the
 // local web server over a nonblocking socket that poll_streams() drives from the tunnel task.
-constexpr size_t OUT_MAX = 4096, HEAD_MAX = 2048, BODY_MAX = CF_H2_CHUNK, HDR_MAX = 24;
+constexpr size_t OUT_MAX = 4096, HEAD_MAX = 2048, BODY_MAX = 2048, HDR_MAX = 24;
+using cft::Bytes;
+using cft::Header;
 enum ChunkState : uint8_t { SIZE, EXT, SIZE_LF, DATA, CRLF1, CRLF2 };
 
 struct Stream {
   int32_t id{0};
-  cf_h2 *h{nullptr};
   const char *sbody{nullptr};  // static body
   size_t slen{0}, sent{0};
   bool head{false}, responded{false};  // responded: the client has seen a response head
@@ -39,7 +36,8 @@ struct Stream {
   int64_t remaining{-1};  // Content-Length bytes still expected; -1 = until close
   ChunkState ch{SIZE};
 };
-static Stream streams[CF_H2_APPLICATION_MAX];
+static Stream streams[cft::MAX_APP_STREAMS];
+static cft::Tunnel *tunnel;
 static const char NOT_FOUND[] = "Not found", BAD_GATEWAY[] = "Bad gateway", TOO_LARGE[] = "Request headers too large",
                   BAD_REQUEST[] = "Bad request", NO_METHOD[] = "Method not allowed";
 
@@ -57,46 +55,17 @@ static void release(Stream *s) {
   *s = Stream{};
 }
 
-static void environment(void *ctx, esp_cf_environment *out) {
-  memset(out, 0, sizeof(*out));
-  out->network_ready = network::is_connected();
-  out->time_valid = time(nullptr) > 1704067200;  // SNTP has synced
-  for (auto ip : network::get_ip_addresses()) {
-    if (ip.is_ip4()) {
-      ip_addr_t a = ip;
-      memcpy(out->local_ip, &ip_2_ip4(&a)->addr, 4);
-      break;
-    }
-  }
-  const ip_addr_t *dns = dns_getserver(0);
-  if (dns && IP_IS_V4(dns)) memcpy(out->dns_ip, &ip_2_ip4(dns)->addr, 4);
-}
-
-static bool json_try_lock(void *) { return true; }  // no other JSON user in this component
-static void json_unlock(void *) {}
-
-static cf_result credentials(void *ctx, cf_credentials *out, char hostname[254]) {
-  auto *self = static_cast<CloudflareTunnel *>(ctx);
-  if (self->hostname().size() > 253) return CF_ERR_STATE;
-  uint8_t scratch[CF_TOKEN_JSON_MAX + 1];
-  memcpy(hostname, self->hostname().c_str(), self->hostname().size() + 1);
-  cf_result rc = cf_credentials_parse({(const uint8_t *) self->token().data(), self->token().size()}, scratch,
-                                      sizeof(scratch), out);
-  cf_secure_zero(scratch, sizeof(scratch));
-  return rc;
-}
-
-static cf_result respond(Stream *s, unsigned status, const char *type, const char *body, size_t length) {
+static void respond(Stream *s, unsigned status, const char *type, const char *body, size_t length) {
   s->sbody = body;
   s->slen = length;
   char len[24];
   snprintf(len, sizeof(len), "%u", (unsigned) length);
 #define H(n, v) {{(const uint8_t *) (n), strlen(n)}, {(const uint8_t *) (v), strlen(v)}}
-  cf_header headers[] = {H("content-type", type), H("content-length", len), H("cache-control", "no-store"),
+  Header headers[] = {H("content-type", type), H("content-length", len), H("cache-control", "no-store"),
                          H("x-content-type-options", "nosniff")};
 #undef H
   s->responded = true;
-  return cf_h2_respond(s->h, s->id, status, headers, 4, true);
+  tunnel->respond(s->id, status, headers, 4, false);
 }
 
 // Proxy failed: 502 if the client has seen nothing yet, otherwise reset the stream.
@@ -105,7 +74,7 @@ static void fail(Stream *s) {
   s->fd = -1;
   s->proxy = false;
   if (s->responded) {
-    cf_h2_reset(s->h, s->id, 2);
+    tunnel->reset(s->id, 2);
   } else {
     respond(s, 502, "text/plain", BAD_GATEWAY, sizeof(BAD_GATEWAY) - 1);
   }
@@ -126,23 +95,23 @@ static bool flush(Stream *s) {
   return true;
 }
 
-static bool bad_token(cf_bytes b, bool allow_space) {
+static bool bad_token(Bytes b, bool allow_space) {
   for (size_t i = 0; i < b.len; i++)
     if (b.ptr[i] < 0x20 || b.ptr[i] == 0x7f || (!allow_space && b.ptr[i] == ' ')) return true;
   return false;
 }
 
-static bool eq(cf_bytes b, const char *lit) { return b.len == strlen(lit) && !memcmp(b.ptr, lit, b.len); }
+static bool eq(Bytes b, const char *lit) { return b.len == strlen(lit) && !memcmp(b.ptr, lit, b.len); }
 
-static bool hop_by_hop(cf_bytes n) {
+static bool hop_by_hop(Bytes n) {
   return eq(n, "connection") || eq(n, "keep-alive") || eq(n, "transfer-encoding") || eq(n, "upgrade") ||
          eq(n, "proxy-connection") || eq(n, "te") || eq(n, "trailer") || eq(n, "host");
 }
 
 // Build "METHOD path HTTP/1.1" plus the forwarded headers into s->out and start the loopback connect.
 // Request bodies are not forwarded: only GET and HEAD are proxied (what the web_server UI needs).
-static cf_result start_proxy(Stream *s, const cf_h2_request *r, cf_bytes method, cf_bytes path, uint16_t port) {
-  cf_bytes auth = cf_h2_header(r, ":authority");
+static void start_proxy(Stream *s, const cft::Request &r, Bytes method, Bytes path, uint16_t port) {
+  Bytes auth = r.get(":authority");
   if (!path.len || bad_token(path, false)) return respond(s, 400, "text/plain", BAD_REQUEST, sizeof(BAD_REQUEST) - 1);
   s->out = (uint8_t *) malloc(OUT_MAX);
   if (!s->out) return respond(s, 503, "text/plain", BAD_GATEWAY, sizeof(BAD_GATEWAY) - 1);
@@ -164,8 +133,8 @@ static cf_result start_proxy(Stream *s, const cf_h2_request *r, cf_bytes method,
   if (auth.len && !bad_token(auth, false)) add(auth.ptr, auth.len);
   else lit("localhost");
   lit("\r\n");
-  for (size_t i = 0; i < r->count; i++) {
-    cf_bytes name = r->headers[i].name, value = r->headers[i].value;
+  for (size_t i = 0; i < r.count; i++) {
+    Bytes name = r.headers[i].name, value = r.headers[i].value;
     if (!name.len || name.ptr[0] == ':' || hop_by_hop(name) || bad_token(name, false) || bad_token(value, true))
       continue;
     add(name.ptr, name.len);
@@ -191,7 +160,6 @@ static cf_result start_proxy(Stream *s, const cf_h2_request *r, cf_bytes method,
     return respond(s, 502, "text/plain", BAD_GATEWAY, sizeof(BAD_GATEWAY) - 1);
   }
   s->proxy = true;
-  return CF_OK;
 }
 
 static int hexval(uint8_t c) {
@@ -259,7 +227,7 @@ static void handle_head(Stream *s, size_t end) {
   if (end < 12 || memcmp(p, "HTTP/1.", 7) || p[8] != ' ') return fail(s);
   unsigned status = (p[9] - '0') * 100 + (p[10] - '0') * 10 + (p[11] - '0');
   if (status < 200 || status > 599) return fail(s);
-  cf_header headers[HDR_MAX];
+  Header headers[HDR_MAX];
   size_t count = 0, i = 0;
   while (i < end && p[i] != '\n') i++;
   for (i++; i < end;) {
@@ -270,10 +238,10 @@ static void handle_head(Stream *s, size_t end) {
     if (colon == eol) break;
     for (size_t k = i; k < colon; k++)
       if (p[k] >= 'A' && p[k] <= 'Z') p[k] |= 0x20;
-    cf_bytes name = {p + i, colon - i};
+    Bytes name = {p + i, colon - i};
     size_t v = colon + 1;
     while (v < eol && p[v] == ' ') v++;
-    cf_bytes value = {p + v, eol - v};
+    Bytes value = {p + v, eol - v};
     if (eq(name, "transfer-encoding")) {
       s->chunked = value.len >= 7 && !memcmp(value.ptr + value.len - 7, "chunked", 7);
     } else if (eq(name, "content-length")) {
@@ -297,7 +265,7 @@ static void handle_head(Stream *s, size_t end) {
   size_t extra = s->in_len - (end + 4);
   memcpy(s->body, p + end + 4, extra);  // extra <= HEAD_MAX <= BODY_MAX
   s->responded = true;
-  if (cf_h2_respond(s->h, s->id, status, headers, count, true) != CF_OK) return fail(s);
+  if (!tunnel->respond(s->id, status, headers, count, true)) return fail(s);
   free(s->in);
   s->in = nullptr;
   if (extra && !s->up_done && !ingest(s, extra)) fail(s);
@@ -346,10 +314,10 @@ static void step(Stream *s) {
       return fail(s);
     }
   }
-  if (s->body_len > s->body_pos || s->up_done) cf_h2_resume(s->h, s->id);
+  if (s->body_len > s->body_pos || s->up_done) tunnel->resume(s->id);
 }
 
-static bool poll_streams(void *) {
+static bool poll_streams() {
   bool busy = false;
   for (auto &s : streams) {
     if (s.id && s.proxy) {
@@ -360,58 +328,73 @@ static bool poll_streams(void *) {
   return busy;
 }
 
-static cf_result request(void *ctx, cf_h2 *h, const cf_h2_request *r) {
-  auto *self = static_cast<CloudflareTunnel *>(ctx);
+bool CloudflareTunnel::request(const cft::Request &r) {
   Stream *s = nullptr;
   for (auto &slot : streams)
     if (!slot.id) {
       s = &slot;
       break;
     }
-  if (!s) return CF_ERR_LIMIT;
+  if (!s) return false;
   *s = Stream{};
-  s->id = r->stream;
-  s->h = h;
-  cf_bytes method = cf_h2_header(r, ":method"), path = cf_h2_header(r, ":path");
+  s->id = r.stream;
+  Bytes method = r.get(":method"), path = r.get(":path");
   s->head = eq(method, "HEAD");
-  if (!eq(method, "GET") && !s->head) return respond(s, 405, "text/plain", NO_METHOD, sizeof(NO_METHOD) - 1);
+  if (!eq(method, "GET") && !s->head) return respond(s, 405, "text/plain", NO_METHOD, sizeof(NO_METHOD) - 1), true;
   size_t n = 0;
   while (n < path.len && path.ptr[n] != '?') n++;  // pages ignore the query string
-  if (const Page *page = self->find_page((const char *) path.ptr, n))
-    return respond(s, 200, page->content_type.c_str(), page->content.data(), page->content.size());
-  if (self->upstream_port()) return start_proxy(s, r, method, path, self->upstream_port());
-  return respond(s, 404, "text/plain", NOT_FOUND, sizeof(NOT_FOUND) - 1);
+  if (const Page *page = this->find_page((const char *) path.ptr, n))
+    respond(s, 200, page->content_type.c_str(), page->content.data(), page->content.size());
+  else if (this->upstream_port_)
+    start_proxy(s, r, method, path, this->upstream_port_);
+  else
+    respond(s, 404, "text/plain", NOT_FOUND, sizeof(NOT_FOUND) - 1);
+  return true;
 }
 
-static cf_result data(void *, int32_t, cf_bytes, bool) { return CF_OK; }  // request bodies are discarded
+bool CloudflareTunnel::data(int32_t, Bytes, bool) { return true; }  // request bodies are discarded
 
-static cf_result read_response(void *, int32_t id, uint8_t *out, size_t capacity, size_t *written, bool *eof) {
+cft::Backend::ReadResult CloudflareTunnel::read(int32_t id, uint8_t *out, size_t capacity, size_t *written, bool *eof) {
   Stream *s = find(id);
-  if (!s) return CF_ERR_STATE;
+  if (!s) return READ_FAIL;
   if (s->proxy) {
     size_t avail = s->body_len - s->body_pos;
     if (!avail) {
       *written = 0;
       *eof = s->up_done;
-      return s->up_done ? CF_OK : CF_ERR_STATE;  // deferred; step() resumes when data arrives
+      return s->up_done ? READ_OK : READ_DEFER;  // step() resumes when data arrives
     }
     *written = avail < capacity ? avail : capacity;
     memcpy(out, s->body + s->body_pos, *written);
     s->body_pos += *written;
     *eof = s->up_done && s->body_pos == s->body_len;
-    return CF_OK;
+    return READ_OK;
   }
   *written = s->head ? 0 : s->slen - s->sent;
   if (*written > capacity) *written = capacity;
   memcpy(out, s->sbody + s->sent, *written);
   s->sent += *written;
   *eof = s->head || s->sent == s->slen;
-  return CF_OK;
+  return READ_OK;
 }
 
-static void closed(void *, int32_t id, uint32_t) {
+void CloudflareTunnel::closed(int32_t id) {
   Stream *s = find(id);
   if (s) release(s);
+}
+
+bool CloudflareTunnel::network_ready() { return network::is_connected(); }
+bool CloudflareTunnel::time_valid() { return time(nullptr) > 1704067200; }  // SNTP has synced
+bool CloudflareTunnel::poll() { return poll_streams(); }
+
+bool CloudflareTunnel::local_ip(uint8_t out[4]) {
+  for (auto ip : network::get_ip_addresses()) {
+    if (!ip.is_ip4()) continue;
+    ip_addr_t a = ip;
+    memcpy(out, &ip_2_ip4(&a)->addr, 4);
+    return true;
+  }
+  return false;
 }
 
 const Page *CloudflareTunnel::find_page(const char *path, size_t len) const {
@@ -421,36 +404,22 @@ const Page *CloudflareTunnel::find_page(const char *path, size_t len) const {
 }
 
 void CloudflareTunnel::setup() {
-  esp_cf_tunnel_config config = {};
-  config.context = this;
-  config.environment = environment;
-  config.credentials = credentials;
-  config.json_try_lock = json_try_lock;
-  config.json_unlock = json_unlock;
-  config.request = request;
-  config.data = data;
-  config.read_response = read_response;
-  config.closed = closed;
-  config.poll = poll_streams;
-  config.version = "esphome";
-  config.arch = "esp32-espidf";
-  config.service = "http://localhost:80";
-  config.application_streams = this->streams_;
-  if (esp_cf_tunnel_init(&config, &this->tunnel_) != ESP_OK || esp_cf_tunnel_start(this->tunnel_) != ESP_OK) {
+  tunnel = &this->tunnel_;
+  cft::Config config = {this->token_.c_str(), this->hostname_.c_str(), "esphome", "esp32-espidf", this->streams_, this};
+  if (this->hostname_.size() > 253 || !this->tunnel_.start(config)) {
     ESP_LOGE(TAG, "Tunnel failed to start");
     this->mark_failed();
   }
 }
+
+void CloudflareTunnel::on_shutdown() { this->tunnel_.stop(); }
 
 void CloudflareTunnel::dump_config() {
   ESP_LOGCONFIG(TAG, "Cloudflare Tunnel:");
   ESP_LOGCONFIG(TAG, "  Hostname: %s", this->hostname_.c_str());
   ESP_LOGCONFIG(TAG, "  Streams: %u, pages: %u, upstream port: %u", this->streams_, (unsigned) this->pages_.size(),
                 this->upstream_port_);
-  if (!this->tunnel_) return;
-  esp_cf_tunnel_snapshot snap;
-  esp_cf_tunnel_get_snapshot(this->tunnel_, &snap);
-  ESP_LOGCONFIG(TAG, "  State: %s", esp_cf_tunnel_state_name(snap.state));
+  ESP_LOGCONFIG(TAG, "  State: %s", this->tunnel_.status());
 }
 
 }  // namespace cloudflare_tunnel

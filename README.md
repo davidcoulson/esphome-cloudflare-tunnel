@@ -1,7 +1,6 @@
 # ESPHome Cloudflare Tunnel
 
-ESPHome external component wrapping [frxbg/esp-cf-tunnel](https://github.com/frxbg/esp-cf-tunnel)
-(native Cloudflare Tunnel connector: TLS 1.3, HTTP/2, Cap'n Proto RPC). MIT, see `components/cloudflare_tunnel/LICENSE*`.
+ESPHome external component: a native Cloudflare Tunnel connector (TLS 1.3, HTTP/2, Cap'n Proto RPC). MIT.
 
 ```yaml
 external_components:
@@ -19,12 +18,14 @@ web_server:                        # what the proxy exposes
 
 Needs the `esp-idf` framework (built and tested on 5.5.4, ESP32-S3). Requires WiFi/Ethernet plus `time:` (SNTP) — the tunnel waits for a valid clock.
 
-## Differences from upstream
-- Builds on IDF 5.5 without the upstream esp-tls patch: the connect poll uses a 5 s `select()` timeout instead (stop can lag by that long).
-- TLS alert diagnostics need an mbedTLS getter that 5.5 lacks; `tls_alert` stays -1.
-- Sources are flattened (ESPHome copies no subfolders) and the CA bundle is a C array.
-- Backend is the proxy/page table above, not the upstream system monitor. The library gained an optional `poll` callback so the proxy can drive its sockets from the tunnel task.
-- Proxy limits: GET/HEAD only (request bodies are dropped, so no POST to switches via the tunnel), no WebSocket upgrade. Chunked responses and SSE (`/events`) are handled.
+## How it works
+Own implementation, written from the public [cloudflared](https://github.com/cloudflare/cloudflared) sources (no code copied): TLS 1.3 to the edge on 7844 (`h2.cftunnel.com`), the device acts as the HTTP/2 server (nghttp2), registers over Cap'n Proto RPC on the control stream, and takes its ingress config from the edge. Host-side tests of the Cap'n Proto/RPC/token code against Go-generated vectors are in `test/host`.
+
+## Limits
+- Edge discovery uses `region1.v2.argotunnel.com` / `region2.v2.argotunnel.com` directly instead of cloudflared's SRV lookup. The token's endpoint field is ignored.
+- One edge connection (dashboard shows Degraded). Config check is simple: some ingress rule must name `hostname`.
+- Proxy: GET/HEAD only (request bodies dropped), no WebSocket upgrade. Chunked responses and SSE (`/events`) are handled.
+- Needs nghttp2 (`espressif/nghttp`) and IDF `json` components, fetched at build.
 
 ## Not verified
-Compiled (IDF 5.5.4) for ESP32, ESP32-S3, ESP32-C3 and ESP32-P4 (`test/*.yaml`). Never flashed, never connected to Cloudflare, proxy never exercised. Upstream is itself experimental (one edge connection, so the dashboard shows Degraded).
+Compiled (IDF 5.5.4) for ESP32, ESP32-S3, ESP32-C3 and ESP32-P4 (`test/*.yaml`); never flashed and never connected to Cloudflare. The register request has no byte-level oracle beyond self-consistency.

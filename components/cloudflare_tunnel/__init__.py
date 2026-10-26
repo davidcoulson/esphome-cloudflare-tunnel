@@ -1,7 +1,11 @@
 import esphome.codegen as cg
 import esphome.config_validation as cv
 from esphome.const import CONF_ID, CONF_PATH
-from esphome.components.esp32 import add_idf_sdkconfig_option, include_builtin_idf_component
+from esphome.components.esp32 import (
+    add_idf_component,
+    add_idf_sdkconfig_option,
+    include_builtin_idf_component,
+)
 
 CODEOWNERS = []
 DEPENDENCIES = ["network"]
@@ -51,15 +55,7 @@ async def to_code(config):
         cg.add(var.add_page(page[CONF_PATH], page[CONF_CONTENT_TYPE], page[CONF_CONTENT]))
 
     include_builtin_idf_component("esp-tls")
-    # The edge requires TLS 1.3 (upstream Kconfig selects this).
+    include_builtin_idf_component("json")
+    add_idf_component(name="espressif/nghttp", ref="1.68.1")
+    # The edge requires TLS 1.3.
     add_idf_sdkconfig_option("CONFIG_MBEDTLS_SSL_PROTO_TLS1_3", True)
-    for flag in (
-        "-DCJSON_NESTING_LIMIT=16",
-        "-DNGHTTP2_STATICLIB",
-        "-DBUILDING_NGHTTP2",
-        "-DHAVE_ARPA_INET_H",
-        "-DHAVE_NETINET_IN_H",
-        "-DHAVE_CLOCK_GETTIME",
-        "-DHAVE_DECL_CLOCK_MONOTONIC=1",
-    ):
-        cg.add_build_flag(flag)
