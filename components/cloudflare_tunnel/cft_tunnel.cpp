@@ -68,6 +68,8 @@ struct Tunnel::Impl {
   bool goaway_seen{false}, fault{false}, stopping{false};
   const char *fail_reason{""};
 
+  char wire[2048];  // serialized response headers
+
   // header block being received
   Header block[HEADER_MAX];
   size_t block_count{0}, block_used{0};
@@ -678,7 +680,7 @@ bool Tunnel::respond(int32_t stream, unsigned status, const Header *headers, siz
   if (!t || !t->h2 || status < 200 || status > 599) return false;
   // Response headers travel serialized in one header so HTTP/1 values bypass HTTP/2 validation; the edge
   // rebuilds them. Control-plane names are dropped, content-length is also sent as a real header.
-  static thread_local char wire[2048];
+  char *wire = t->wire;  // not thread_local: that adds 2 KB of TLS to every FreeRTOS task's stack
   Header user[24];
   size_t nu = 0;
   Bytes length{};
@@ -689,7 +691,7 @@ bool Tunnel::respond(int32_t stream, unsigned status, const Header *headers, siz
     if (starts(":") || starts("cf-int-") || starts("cf-cloudflared-") || starts("cf-proxy-")) continue;
     if (nu < 24) user[nu++] = headers[i];
   }
-  int wl = encode_headers(user, nu, wire, sizeof wire);
+  int wl = encode_headers(user, nu, wire, sizeof t->wire);
   if (wl < 0) return false;
   Slot *s = t->find(stream);
   if (!s || !s->started || s->responded || s->reset) return false;
