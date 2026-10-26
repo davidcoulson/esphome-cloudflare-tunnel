@@ -387,14 +387,23 @@ bool CloudflareTunnel::network_ready() { return network::is_connected(); }
 bool CloudflareTunnel::time_valid() { return time(nullptr) > 1704067200; }  // SNTP has synced
 bool CloudflareTunnel::poll() { return poll_streams(); }
 
-bool CloudflareTunnel::local_ip(uint8_t out[4]) {
+size_t CloudflareTunnel::local_ip(uint8_t out[16]) {
+  // IPv4 if there is one, else a global IPv6 address, else a link-local one.
+  size_t n = 0;
   for (auto ip : network::get_ip_addresses()) {
-    if (!ip.is_ip4()) continue;
     ip_addr_t a = ip;
-    memcpy(out, &ip_2_ip4(&a)->addr, 4);
-    return true;
+    if (ip.is_ip4()) {
+      memcpy(out, &ip_2_ip4(&a)->addr, 4);
+      return 4;
+    }
+#if LWIP_IPV6
+    if (ip.is_ip6() && (n != 16 || !ip6_addr_islinklocal(ip_2_ip6(&a)))) {
+      memcpy(out, ip_2_ip6(&a)->addr, 16);
+      n = 16;
+    }
+#endif
   }
-  return false;
+  return n;
 }
 
 const Page *CloudflareTunnel::find_page(const char *path, size_t len) const {

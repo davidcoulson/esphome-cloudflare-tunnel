@@ -23,7 +23,7 @@ class Backend {
   virtual ~Backend() = default;
   virtual bool network_ready() = 0;
   virtual bool time_valid() = 0;  // TLS certificate checks need a sane clock
-  virtual bool local_ip(uint8_t out[4]) = 0;
+  virtual size_t local_ip(uint8_t out[16]) = 0;  // bytes written: 4 (IPv4), 16 (IPv6) or 0 (none)
   // All of these run on the tunnel task and must not block.
   virtual bool request(const Request &r) = 0;                       // false: refuse the stream
   virtual bool data(int32_t stream, Bytes chunk, bool end) = 0;     // request body; false: cancel the stream

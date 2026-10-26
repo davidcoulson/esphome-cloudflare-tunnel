@@ -129,7 +129,7 @@ struct Tunnel::Impl {
       return false;
     }
     if (rpc.state == READY) {
-      opts.local_ip = {local_ip, 4};
+      opts.local_ip = {local_ip, local_ip_len};
       opts.previous_attempts = attempts > 256 ? 255 : (uint8_t) (attempts - 1);
       r = rpc.register_connection(cred, opts, out, sizeof out, &n);
       memset(&cred, 0, sizeof cred);  // the secret is not needed again
@@ -497,13 +497,14 @@ struct Tunnel::Impl {
   }
 
   // ---- connection ----
-  uint8_t local_ip[4];
+  uint8_t local_ip[16];
+  size_t local_ip_len{0};
 
   bool connect() {
     status("Connecting");
     Result r = parse_token(cfg.token, strlen(cfg.token), &cred);
     if (r != OK) return fail("Invalid tunnel token"), rejected_for_good = true, false;
-    if (!cfg.backend->local_ip(local_ip)) return fail("No IPv4 address");
+    if (!(local_ip_len = cfg.backend->local_ip(local_ip))) return fail("No IP address");
     esp_tls_cfg_t tc = {};
     tc.common_name = EDGE_TLS_NAME;
     tc.cacert_buf = cf_edge_ca_pem;

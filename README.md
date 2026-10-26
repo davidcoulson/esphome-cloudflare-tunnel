@@ -23,6 +23,7 @@ Own implementation, written from the public [cloudflared](https://github.com/clo
 
 ## Limits
 - Edge discovery uses `region1.v2.argotunnel.com` / `region2.v2.argotunnel.com` directly instead of cloudflared's SRV lookup. The token's endpoint field is ignored.
+- IPv6-only works in principle (set `network: enable_ipv6: true`; the IPv6 address is sent as the local IP) but is untested.
 - One edge connection (dashboard shows Degraded). Config check is simple: some ingress rule must name `hostname`.
 - Proxy: GET/HEAD only (request bodies dropped), no WebSocket upgrade. Chunked responses and SSE (`/events`) are handled.
 - Needs nghttp2 (`espressif/nghttp`) and IDF `json` components, fetched at build.

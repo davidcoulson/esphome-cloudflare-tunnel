@@ -34,7 +34,7 @@ class CloudflareTunnel : public Component, public cft::Backend {
 
   bool network_ready() override;
   bool time_valid() override;
-  bool local_ip(uint8_t out[4]) override;
+  size_t local_ip(uint8_t out[16]) override;
   bool request(const cft::Request &r) override;
   bool data(int32_t stream, cft::Bytes chunk, bool end) override;
   ReadResult read(int32_t stream, uint8_t *buf, size_t cap, size_t *n, bool *eof) override;
