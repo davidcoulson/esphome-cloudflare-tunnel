@@ -31,7 +31,7 @@ Own implementation, written from the public [cloudflared](https://github.com/clo
 - Needs nghttp2 (`espressif/nghttp`) and IDF `json` components, fetched at build.
 
 ## Verified
-Ran on an ESP32-C6 (ESPHome 2026.10.0, IDF 6.1.0) over IPv4 against the real Cloudflare edge: registered and served through the tunnel. Compiled (IDF 5.5.4) for ESP32, ESP32-S3, ESP32-C3 and ESP32-P4 (`test/*.yaml`) but not flashed on those.
+Ran on an ESP32-C6 (ESPHome 2026.10.0, IDF 6.1.0) over IPv4 against the real Cloudflare edge: registered, and the device's web UI loads over HTTPS through the tunnel hostname. Compiled (IDF 5.5.4) for ESP32, ESP32-S3, ESP32-C3 and ESP32-P4 (`test/*.yaml`) but not flashed on those.
 
 ## Not verified
 IPv6-only operation: the C6 reached IPv6 networking but the connect to the edge failed with "Host is unreachable" on a ULA-only VLAN (a network/firewall issue, not confirmed). The register request has no byte-level oracle beyond self-consistency.
